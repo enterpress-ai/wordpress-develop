@@ -78,8 +78,8 @@ CREATE TABLE {prefix}task_queue (
     claimed_by varchar(255) default NULL,          -- Worker ID that claimed this task
     claimed_at datetime default NULL,
     completed_at datetime default NULL,
-    attempts int(10) unsigned NOT NULL default '0',
-    max_attempts int(10) unsigned NOT NULL default '3',
+    attempts int(10) unsigned NOT NULL default 0,
+    max_attempts int(10) unsigned NOT NULL default 3,
     created_at datetime NOT NULL default CURRENT_TIMESTAMP,
     PRIMARY KEY  (id),
     KEY idx_task_queue_hook (hook),

@@ -859,7 +859,7 @@ function wp_default_scripts( $scripts ) {
 	$scripts->add( 'autosave', "/wp-includes/js/autosave$suffix.js", array( 'heartbeat' ), false, 1 );
 
 	// EnterPress: Supabase Realtime client (CDN).
-	$scripts->add( 'supabase-realtime', 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js', array(), null, 1 );
+	$scripts->add( 'supabase-realtime', 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.97.0/dist/umd/supabase.min.js', array(), '2.97.0', 1 );
 
 	// EnterPress: Replace heartbeat polling with WebSocket-based realtime.
 	$scripts->add( 'heartbeat', "/wp-includes/js/realtime$suffix.js", array( 'jquery', 'wp-hooks', 'supabase-realtime' ), false, 1 );
