@@ -268,18 +268,18 @@ class Tests_EnterPress_TaskQueue extends WP_UnitTestCase {
 		$result = wp_reschedule_event( $ts, 'daily', $hook, $args );
 		$this->assertTrue( $result );
 
-		// There should now be 2 rows in task_queue for this hook.
+		// UPSERT behavior: the existing row is updated (not duplicated).
 		$count = $wpdb->get_var(
 			$wpdb->prepare(
 				"SELECT COUNT(*) FROM {$this->table} WHERE hook = %s",
 				$hook
 			)
 		);
-		$this->assertSame( '2', $count, 'Rescheduling should create a second row.' );
+		$this->assertSame( '1', $count, 'Rescheduling should update the existing row, not create a duplicate.' );
 
 		// The rescheduled event should have a future timestamp.
 		$new_event = wp_get_scheduled_event( $hook, $args );
-		$this->assertGreaterThanOrEqual( $ts, $new_event->timestamp );
+		$this->assertGreaterThan( $ts, $new_event->timestamp );
 	}
 
 	/**
@@ -307,13 +307,11 @@ class Tests_EnterPress_TaskQueue extends WP_UnitTestCase {
 		// Remove the custom schedule.
 		remove_filter( 'cron_schedules', $add_schedule );
 
-		// Reschedule -- should read interval from stored row.
+		// Reschedule -- should read interval from stored row and update in-place.
 		$result = wp_reschedule_event( $ts, 'every_five_min', $hook );
 		$this->assertTrue( $result );
 
-		// Remove the original event so wp_next_scheduled returns the rescheduled one.
-		wp_unschedule_event( $ts, $hook );
-
+		// The existing row was updated, so wp_next_scheduled returns the new time.
 		$next_ts = wp_next_scheduled( $hook );
 		$this->assertGreaterThanOrEqual( $ts + 300, $next_ts );
 	}

@@ -612,8 +612,18 @@ function wp_load_alloptions( $force_cache = false ) {
 		return $alloptions;
 	}
 
-	// EnterPress: No bulk option loading. Each option is fetched individually
-	// via get_option()'s existing fallback path, enabling lazy-load behavior.
+	/*
+	 * EnterPress: No bulk option loading. Each option is fetched individually
+	 * via get_option()'s existing DB fallback path + per-request object cache.
+	 *
+	 * Performance note: In production, the external object cache (Redis) is
+	 * pre-warmed by the connection proxy which learns per-URL access patterns
+	 * and pre-fetches required options in a single batch query before PHP
+	 * starts. Without an external object cache, each get_option() call that
+	 * misses the in-memory cache will issue an individual DB query — acceptable
+	 * for development, but an external object cache is strongly recommended
+	 * for production deployments.
+	 */
 	$alloptions = array();
 
 	/**

@@ -5,6 +5,9 @@
  * realtime system powered by Supabase Realtime. Provides backward-compatible
  * wp.heartbeat shim so existing plugins continue to work.
  *
+ * Falls back to classic AJAX polling when Supabase configuration is absent
+ * or the Supabase client fails to load.
+ *
  * Custom jQuery events (backward-compatible):
  * - heartbeat-send
  * - heartbeat-tick
@@ -27,33 +30,38 @@
 				tablePrefix: typeof wpRealtimeSettings !== 'undefined' ? wpRealtimeSettings.tablePrefix : 'wp_',
 				ajaxUrl: typeof wpRealtimeSettings !== 'undefined' ? wpRealtimeSettings.ajaxUrl : '',
 				nonce: typeof wpRealtimeSettings !== 'undefined' ? wpRealtimeSettings.nonce : '',
+				eventsPerSecond: typeof wpRealtimeSettings !== 'undefined' && wpRealtimeSettings.eventsPerSecond ? parseInt( wpRealtimeSettings.eventsPerSecond, 10 ) : 2,
 				screenId: typeof pagenow !== 'undefined' ? pagenow : 'front',
 				hasFocus: true,
 				connected: false,
 				connectionError: false,
-				autosaveInterval: 60
+				autosaveInterval: 60,
+				pollInterval: 15,
+				usingFallback: false
 			},
 			queue = {},
 			channel = null,
 			client = null,
-			autosaveTimer = null;
+			autosaveTimer = null,
+			pollTimer = null;
 
 		/**
 		 * Initialize Supabase Realtime client and subscribe to channels.
+		 * Falls back to AJAX polling if Supabase is unavailable.
 		 */
 		function initialize() {
-			if ( ! settings.url || ! settings.anonKey ) {
-				return;
-			}
-
-			if ( typeof window.supabase === 'undefined' || typeof window.supabase.createClient === 'undefined' ) {
+			if ( ! settings.url || ! settings.anonKey ||
+				typeof window.supabase === 'undefined' ||
+				typeof window.supabase.createClient === 'undefined' ) {
+				// Supabase not available — degrade to classic AJAX heartbeat polling.
+				startFallbackPolling();
 				return;
 			}
 
 			client = window.supabase.createClient( settings.url, settings.anonKey, {
 				realtime: {
 					params: {
-						eventsPerSecond: 2
+						eventsPerSecond: settings.eventsPerSecond
 					}
 				}
 			});
@@ -143,7 +151,52 @@
 		}
 
 		/**
-		 * Start periodic autosave trigger.
+		 * Send queued data and trigger heartbeat-send via AJAX.
+		 *
+		 * Used by both the realtime autosave path and the fallback poller.
+		 */
+		function sendHeartbeat() {
+			if ( ! settings.hasFocus && ! settings.usingFallback ) {
+				return;
+			}
+
+			var data = {};
+			$document.trigger( 'heartbeat-send', [ data ] );
+
+			var sendData = $.extend( {}, data, queue );
+
+			// Clear the queue — one-shot semantics matching legacy Heartbeat.
+			queue = {};
+
+			if ( $.isEmptyObject( sendData ) && ! settings.usingFallback ) {
+				return;
+			}
+
+			sendData.action = 'heartbeat';
+			sendData._nonce = settings.nonce;
+			sendData.screen_id = settings.screenId;
+			sendData.has_focus = settings.hasFocus;
+
+			$.ajax({
+				url: settings.ajaxUrl,
+				type: 'POST',
+				data: sendData,
+				dataType: 'json'
+			}).done( function( response ) {
+				if ( response ) {
+					// Handle nonce refresh.
+					if ( response.nonces_expired ) {
+						$document.trigger( 'heartbeat-nonces-expired' );
+					}
+					$document.trigger( 'heartbeat-tick', [ response, settings.usingFallback ? 'poll' : 'realtime' ] );
+				}
+			}).fail( function() {
+				$document.trigger( 'heartbeat-error', [ null, settings.usingFallback ? 'poll' : 'realtime', '' ] );
+			});
+		}
+
+		/**
+		 * Start periodic autosave trigger (realtime mode).
 		 */
 		function startAutosave() {
 			if ( autosaveTimer ) {
@@ -151,35 +204,29 @@
 			}
 
 			autosaveTimer = setInterval( function() {
-				if ( ! settings.hasFocus ) {
-					return;
-				}
-
-				var data = {};
-				$document.trigger( 'heartbeat-send', [ data ] );
-
-				// If autosave data was enqueued, post it to admin-ajax.php.
-				if ( data.wp_autosave || ! $.isEmptyObject( queue ) ) {
-					var sendData = $.extend( {}, data, queue );
-					sendData.action = 'heartbeat';
-					sendData._nonce = settings.nonce;
-					sendData.screen_id = settings.screenId;
-					sendData.has_focus = settings.hasFocus;
-
-					$.ajax({
-						url: settings.ajaxUrl,
-						type: 'POST',
-						data: sendData,
-						dataType: 'json'
-					}).done( function( response ) {
-						if ( response ) {
-							$document.trigger( 'heartbeat-tick', [ response, 'realtime' ] );
-						}
-					}).fail( function() {
-						$document.trigger( 'heartbeat-error', [ null, 'realtime', '' ] );
-					});
-				}
+				sendHeartbeat();
 			}, settings.autosaveInterval * 1000 );
+		}
+
+		/**
+		 * Start classic AJAX heartbeat polling (fallback mode).
+		 *
+		 * Activates when Supabase configuration is absent or the client
+		 * fails to load. Preserves autosave, post lock, and nonce refresh.
+		 */
+		function startFallbackPolling() {
+			settings.usingFallback = true;
+
+			// Track focus.
+			$( window ).on( 'focus', function() {
+				settings.hasFocus = true;
+			}).on( 'blur', function() {
+				settings.hasFocus = false;
+			});
+
+			pollTimer = setInterval( function() {
+				sendHeartbeat();
+			}, settings.pollInterval * 1000 );
 		}
 
 		// Run initialization immediately.
@@ -214,15 +261,27 @@
 			},
 
 			interval: function( speed ) {
-				// In realtime mode, interval is not meaningful but we accept the call.
 				if ( speed ) {
-					settings.autosaveInterval = Math.max( 15, parseInt( speed, 10 ) );
+					var newInterval = Math.max( 15, parseInt( speed, 10 ) );
+					if ( settings.usingFallback ) {
+						settings.pollInterval = newInterval;
+						if ( pollTimer ) {
+							clearInterval( pollTimer );
+							pollTimer = setInterval( function() {
+								sendHeartbeat();
+							}, settings.pollInterval * 1000 );
+						}
+					} else {
+						settings.autosaveInterval = newInterval;
+					}
 				}
-				return settings.autosaveInterval;
+				return settings.usingFallback ? settings.pollInterval : settings.autosaveInterval;
 			},
 
 			connectNow: function() {
-				if ( ! settings.connected && client ) {
+				if ( settings.usingFallback ) {
+					sendHeartbeat();
+				} else if ( ! settings.connected && client ) {
 					channel && channel.subscribe();
 				}
 				return this;
@@ -230,6 +289,7 @@
 
 			disableSuspend: function() {
 				// No-op in realtime mode. WebSocket stays connected.
+				// In fallback mode, polling runs continuously regardless.
 				return this;
 			},
 

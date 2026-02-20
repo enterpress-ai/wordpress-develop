@@ -186,6 +186,25 @@ CREATE TABLE $wpdb->posts (
 	KEY post_parent (post_parent),
 	KEY post_author (post_author),
 	KEY type_status_author (post_type,post_status,post_author)
+) $charset_collate;
+CREATE TABLE {$wpdb->prefix}task_queue (
+	id bigint(20) unsigned NOT NULL auto_increment,
+	hook varchar(255) NOT NULL,
+	args text,
+	args_hash varchar(32) NOT NULL default '',
+	schedule varchar(255) default NULL,
+	interval_seconds int(10) unsigned default NULL,
+	next_run datetime NOT NULL default '0000-00-00 00:00:00',
+	status varchar(20) NOT NULL default 'pending',
+	claimed_by varchar(255) default NULL,
+	claimed_at datetime default NULL,
+	completed_at datetime default NULL,
+	attempts int(10) unsigned NOT NULL default '0',
+	max_attempts int(10) unsigned NOT NULL default '3',
+	created_at datetime NOT NULL default CURRENT_TIMESTAMP,
+	PRIMARY KEY  (id),
+	KEY idx_task_queue_hook (hook),
+	KEY idx_task_queue_next_run_status (next_run,status)
 ) $charset_collate;\n";
 
 	// Single site users table. The multisite flavor of the users table is handled below.

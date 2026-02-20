@@ -88,7 +88,7 @@ function wp_schedule_single_event( $timestamp, $hook, $args = array(), $wp_error
 	/*
 	 * EnterPress: Duplicate check via task_queue table.
 	 */
-	$args_hash = md5( serialize( $event->args ) );
+	$args_hash = md5( maybe_serialize( $event->args ) );
 
 	if ( $event->timestamp < time() + 10 * MINUTE_IN_SECONDS ) {
 		$min_timestamp = 0;
@@ -145,7 +145,7 @@ function wp_schedule_single_event( $timestamp, $hook, $args = array(), $wp_error
 		$table,
 		array(
 			'hook'             => $event->hook,
-			'args'             => serialize( $event->args ),
+			'args'             => maybe_serialize( $event->args ),
 			'args_hash'        => $args_hash,
 			'schedule'         => null,
 			'interval_seconds' => null,
@@ -279,22 +279,51 @@ function wp_schedule_event( $timestamp, $recurrence, $hook, $args = array(), $wp
 		return false;
 	}
 
-	$args_hash = md5( serialize( $event->args ) );
+	$args_hash = md5( maybe_serialize( $event->args ) );
 	$table     = $wpdb->prefix . 'task_queue';
 
-	$result = $wpdb->insert(
-		$table,
-		array(
-			'hook'             => $event->hook,
-			'args'             => serialize( $event->args ),
-			'args_hash'        => $args_hash,
-			'schedule'         => $event->schedule,
-			'interval_seconds' => $event->interval,
-			'next_run'         => gmdate( 'Y-m-d H:i:s', $event->timestamp ),
-			'status'           => 'pending',
-		),
-		array( '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
+	/*
+	 * EnterPress: Duplicate-guard for recurring events.
+	 *
+	 * Many plugins call wp_schedule_event() on every init. If a pending
+	 * event with the same hook + args already exists, update its next_run
+	 * instead of inserting a duplicate row.
+	 */
+	$existing_id = $wpdb->get_var(
+		$wpdb->prepare(
+			"SELECT id FROM {$table} WHERE hook = %s AND args_hash = %s AND status IN ('pending','claimed') LIMIT 1",
+			$event->hook,
+			$args_hash
+		)
 	);
+
+	if ( $existing_id ) {
+		$result = $wpdb->update(
+			$table,
+			array(
+				'schedule'         => $event->schedule,
+				'interval_seconds' => $event->interval,
+				'next_run'         => gmdate( 'Y-m-d H:i:s', $event->timestamp ),
+			),
+			array( 'id' => $existing_id ),
+			array( '%s', '%d', '%s' ),
+			array( '%d' )
+		);
+	} else {
+		$result = $wpdb->insert(
+			$table,
+			array(
+				'hook'             => $event->hook,
+				'args'             => maybe_serialize( $event->args ),
+				'args_hash'        => $args_hash,
+				'schedule'         => $event->schedule,
+				'interval_seconds' => $event->interval,
+				'next_run'         => gmdate( 'Y-m-d H:i:s', $event->timestamp ),
+				'status'           => 'pending',
+			),
+			array( '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
+		);
+	}
 
 	if ( false === $result ) {
 		if ( $wp_error ) {
@@ -450,27 +479,49 @@ function wp_reschedule_event( $timestamp, $recurrence, $hook, $args = array(), $
 	}
 
 	// EnterPress: Schedule is gone but we have a stored interval.
-	// Insert directly into the task_queue to avoid the schedule validation
-	// in wp_schedule_event(). This keeps recurring events alive even when
-	// the originating plugin / schedule is temporarily unavailable.
+	// Update the existing row's next_run directly to avoid the schedule
+	// validation in wp_schedule_event(). This keeps recurring events alive
+	// even when the originating plugin / schedule is temporarily unavailable.
 	global $wpdb;
 
-	$args_hash = md5( serialize( $args ) );
+	$args_hash = md5( maybe_serialize( $args ) );
 	$table     = $wpdb->prefix . 'task_queue';
 
-	$result = $wpdb->insert(
-		$table,
-		array(
-			'hook'             => $hook,
-			'args'             => serialize( $args ),
-			'args_hash'        => $args_hash,
-			'schedule'         => $recurrence,
-			'interval_seconds' => $interval,
-			'next_run'         => gmdate( 'Y-m-d H:i:s', $timestamp ),
-			'status'           => 'pending',
-		),
-		array( '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
+	// Update the existing row rather than inserting a duplicate.
+	$existing_id = $wpdb->get_var(
+		$wpdb->prepare(
+			"SELECT id FROM {$table} WHERE hook = %s AND args_hash = %s AND status IN ('pending','claimed') ORDER BY next_run ASC LIMIT 1",
+			$hook,
+			$args_hash
+		)
 	);
+
+	if ( $existing_id ) {
+		$result = $wpdb->update(
+			$table,
+			array(
+				'next_run' => gmdate( 'Y-m-d H:i:s', $timestamp ),
+				'status'   => 'pending',
+			),
+			array( 'id' => $existing_id ),
+			array( '%s', '%s' ),
+			array( '%d' )
+		);
+	} else {
+		$result = $wpdb->insert(
+			$table,
+			array(
+				'hook'             => $hook,
+				'args'             => maybe_serialize( $args ),
+				'args_hash'        => $args_hash,
+				'schedule'         => $recurrence,
+				'interval_seconds' => $interval,
+				'next_run'         => gmdate( 'Y-m-d H:i:s', $timestamp ),
+				'status'           => 'pending',
+			),
+			array( '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
+		);
+	}
 
 	if ( false === $result ) {
 		if ( $wp_error ) {
@@ -540,7 +591,7 @@ function wp_unschedule_event( $timestamp, $hook, $args = array(), $wp_error = fa
 	}
 
 	$table     = $wpdb->prefix . 'task_queue';
-	$args_hash = md5( serialize( $args ) );
+	$args_hash = md5( maybe_serialize( $args ) );
 	$next_run  = gmdate( 'Y-m-d H:i:s', $timestamp );
 
 	$result = $wpdb->query(
@@ -626,7 +677,7 @@ function wp_clear_scheduled_hook( $hook, $args = array(), $wp_error = false ) {
 	}
 
 	$table     = $wpdb->prefix . 'task_queue';
-	$args_hash = md5( serialize( $args ) );
+	$args_hash = md5( maybe_serialize( $args ) );
 
 	$result = $wpdb->query(
 		$wpdb->prepare(
@@ -752,7 +803,7 @@ function wp_get_scheduled_event( $hook, $args = array(), $timestamp = null ) {
 	}
 
 	$table     = $wpdb->prefix . 'task_queue';
-	$args_hash = md5( serialize( $args ) );
+	$args_hash = md5( maybe_serialize( $args ) );
 
 	if ( null !== $timestamp ) {
 		$next_run = gmdate( 'Y-m-d H:i:s', $timestamp );

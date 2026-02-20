@@ -867,11 +867,12 @@ function wp_default_scripts( $scripts ) {
 		'heartbeat',
 		'wpRealtimeSettings',
 		array(
-			'supabaseUrl'    => defined( 'SUPABASE_URL' ) ? SUPABASE_URL : '',
-			'supabaseAnonKey' => defined( 'SUPABASE_ANON_KEY' ) ? SUPABASE_ANON_KEY : '',
-			'tablePrefix'    => $GLOBALS['wpdb']->prefix,
-			'ajaxUrl'        => admin_url( 'admin-ajax.php' ),
-			'nonce'          => wp_installing() ? '' : wp_create_nonce( 'heartbeat-nonce' ),
+			'supabaseUrl'      => defined( 'SUPABASE_URL' ) ? SUPABASE_URL : '',
+			'supabaseAnonKey'  => defined( 'SUPABASE_ANON_KEY' ) ? SUPABASE_ANON_KEY : '',
+			'tablePrefix'      => $GLOBALS['wpdb']->prefix,
+			'ajaxUrl'          => admin_url( 'admin-ajax.php' ),
+			'nonce'            => wp_installing() ? '' : wp_create_nonce( 'heartbeat-nonce' ),
+			'eventsPerSecond'  => defined( 'ENTERPRESS_REALTIME_EVENTS_PER_SEC' ) ? (int) ENTERPRESS_REALTIME_EVENTS_PER_SEC : 2,
 		)
 	);
 	did_action( 'init' ) && $scripts->localize(
