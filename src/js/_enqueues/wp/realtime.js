@@ -64,14 +64,14 @@
 			channel = client.channel( 'enterpress-realtime' )
 				.on(
 					'postgres_changes',
-					{ event: '*', schema: 'public', table: postmetaTable },
+					{ event: '*', schema: 'public', table: postmetaTable, filter: 'meta_key=eq._edit_lock' },
 					function( payload ) {
 						handlePostmetaChange( payload );
 					}
 				)
 				.on(
 					'postgres_changes',
-					{ event: '*', schema: 'public', table: postsTable },
+					{ event: '*', schema: 'public', table: postsTable, filter: 'post_status=eq.auto-draft' },
 					function( payload ) {
 						handlePostChange( payload );
 					}
@@ -105,30 +105,41 @@
 
 		/**
 		 * Handle postmeta changes (edit locks, etc.).
+		 *
+		 * Translates Supabase Realtime payloads into the keyed-object format
+		 * expected by WordPress Heartbeat listeners.
 		 */
 		function handlePostmetaChange( payload ) {
-			var data = {
-				type: 'postmeta',
-				eventType: payload.eventType,
-				record: payload.new || {},
-				oldRecord: payload.old || {}
-			};
+			var data = {};
 
-			$document.trigger( 'heartbeat-tick', [ data ] );
+			if ( payload.new && payload.new.meta_key === '_edit_lock' ) {
+				data['wp-edit-lock'] = {
+					post_id: payload.new.post_id,
+					lock: payload.new.meta_value
+				};
+			}
+
+			$document.trigger( 'heartbeat-tick', [ data, 'realtime' ] );
 		}
 
 		/**
 		 * Handle post changes (autosave notifications, etc.).
+		 *
+		 * Translates Supabase Realtime payloads into the keyed-object format
+		 * expected by WordPress Heartbeat listeners.
 		 */
 		function handlePostChange( payload ) {
-			var data = {
-				type: 'post',
-				eventType: payload.eventType,
-				record: payload.new || {},
-				oldRecord: payload.old || {}
-			};
+			var data = {};
 
-			$document.trigger( 'heartbeat-tick', [ data ] );
+			if ( payload.new ) {
+				data['wp-autosave'] = {
+					post_id: payload.new.ID || payload.new.id,
+					post_status: payload.new.post_status,
+					post_modified: payload.new.post_modified
+				};
+			}
+
+			$document.trigger( 'heartbeat-tick', [ data, 'realtime' ] );
 		}
 
 		/**
@@ -170,6 +181,9 @@
 				}
 			}, settings.autosaveInterval * 1000 );
 		}
+
+		// Run initialization immediately.
+		initialize();
 
 		/**
 		 * Backward-compatible API matching wp.heartbeat.

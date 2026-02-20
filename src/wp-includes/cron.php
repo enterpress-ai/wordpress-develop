@@ -758,7 +758,7 @@ function wp_get_scheduled_event( $hook, $args = array(), $timestamp = null ) {
 		$next_run = gmdate( 'Y-m-d H:i:s', $timestamp );
 		$row      = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT * FROM {$table} WHERE hook = %s AND args_hash = %s AND next_run = %s AND status IN ('pending','claimed') LIMIT 1",
+				"SELECT hook, args, args_hash, schedule, interval_seconds, next_run FROM {$table} WHERE hook = %s AND args_hash = %s AND next_run = %s AND status IN ('pending','claimed') LIMIT 1",
 				$hook,
 				$args_hash,
 				$next_run
@@ -767,7 +767,7 @@ function wp_get_scheduled_event( $hook, $args = array(), $timestamp = null ) {
 	} else {
 		$row = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT * FROM {$table} WHERE hook = %s AND args_hash = %s AND status IN ('pending','claimed') ORDER BY next_run ASC LIMIT 1",
+				"SELECT hook, args, args_hash, schedule, interval_seconds, next_run FROM {$table} WHERE hook = %s AND args_hash = %s AND status IN ('pending','claimed') ORDER BY next_run ASC LIMIT 1",
 				$hook,
 				$args_hash
 			)
@@ -1024,7 +1024,7 @@ function wp_get_ready_cron_jobs() {
 	$now     = gmdate( 'Y-m-d H:i:s' );
 	$rows    = $wpdb->get_results(
 		$wpdb->prepare(
-			"SELECT * FROM {$table} WHERE next_run <= %s AND status = 'pending' ORDER BY next_run ASC",
+			"SELECT hook, args, args_hash, schedule, interval_seconds, next_run FROM {$table} WHERE next_run <= %s AND status = 'pending' ORDER BY next_run ASC",
 			$now
 		)
 	);

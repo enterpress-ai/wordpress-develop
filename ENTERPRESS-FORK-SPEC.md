@@ -67,7 +67,9 @@ CREATE TABLE wp_task_queue (
     id BIGSERIAL PRIMARY KEY,
     hook VARCHAR(255) NOT NULL,
     args TEXT,
+    args_hash VARCHAR(32) NOT NULL DEFAULT '',  -- MD5 of serialized args for duplicate detection
     schedule VARCHAR(255),           -- 'hourly', 'daily', etc. NULL for single events
+    interval_seconds INTEGER,        -- Recurrence interval in seconds (e.g. 3600 for hourly)
     next_run TIMESTAMPTZ NOT NULL,
     status VARCHAR(20) DEFAULT 'pending',  -- 'pending', 'claimed', 'completed', 'failed'
     claimed_by VARCHAR(255),         -- Worker ID that claimed this task
@@ -78,8 +80,8 @@ CREATE TABLE wp_task_queue (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX idx_task_queue_next_run ON wp_task_queue(next_run) WHERE status = 'pending';
 CREATE INDEX idx_task_queue_hook ON wp_task_queue(hook);
+CREATE INDEX idx_task_queue_next_run_status ON wp_task_queue(next_run, status);
 ```
 
 **Compatibility:** Plugins that call `wp_schedule_event()` or `wp_schedule_single_event()` work unchanged — the API is preserved, only the storage backend changes. Plugins that read the `cron` option directly (rare) will see it empty.
