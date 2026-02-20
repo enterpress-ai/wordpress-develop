@@ -286,14 +286,19 @@ function wp_schedule_event( $timestamp, $recurrence, $hook, $args = array(), $wp
 	 * EnterPress: Duplicate-guard for recurring events.
 	 *
 	 * Many plugins call wp_schedule_event() on every init. If a pending
-	 * event with the same hook + args already exists, update its next_run
-	 * instead of inserting a duplicate row.
+	 * recurring event with the same hook + args + schedule already exists,
+	 * update its next_run instead of inserting a duplicate row.
+	 *
+	 * Only pending rows are updated — claimed rows are left alone to avoid
+	 * race conditions with workers. The schedule column is matched to prevent
+	 * a recurring event from overwriting a single event (schedule IS NULL).
 	 */
 	$existing_id = $wpdb->get_var(
 		$wpdb->prepare(
-			"SELECT id FROM {$table} WHERE hook = %s AND args_hash = %s AND status IN ('pending','claimed') LIMIT 1",
+			"SELECT id FROM {$table} WHERE hook = %s AND args_hash = %s AND schedule = %s AND status = 'pending' LIMIT 1",
 			$event->hook,
-			$args_hash
+			$args_hash,
+			$event->schedule
 		)
 	);
 
@@ -301,12 +306,11 @@ function wp_schedule_event( $timestamp, $recurrence, $hook, $args = array(), $wp
 		$result = $wpdb->update(
 			$table,
 			array(
-				'schedule'         => $event->schedule,
 				'interval_seconds' => $event->interval,
 				'next_run'         => gmdate( 'Y-m-d H:i:s', $event->timestamp ),
 			),
 			array( 'id' => $existing_id ),
-			array( '%s', '%d', '%s' ),
+			array( '%d', '%s' ),
 			array( '%d' )
 		);
 	} else {
@@ -1075,7 +1079,8 @@ function wp_get_ready_cron_jobs() {
 	$now     = gmdate( 'Y-m-d H:i:s' );
 	$rows    = $wpdb->get_results(
 		$wpdb->prepare(
-			"SELECT hook, args, args_hash, schedule, interval_seconds, next_run FROM {$table} WHERE next_run <= %s AND status = 'pending' ORDER BY next_run ASC",
+			"SELECT hook, args, args_hash, schedule, interval_seconds, next_run FROM {$table} WHERE next_run <= %s AND ( status = 'pending' OR ( status = 'claimed' AND claimed_at <= DATE_SUB(%s, INTERVAL 5 MINUTE) ) ) ORDER BY next_run ASC",
+			$now,
 			$now
 		)
 	);

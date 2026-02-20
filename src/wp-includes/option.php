@@ -613,18 +613,19 @@ function wp_load_alloptions( $force_cache = false ) {
 	}
 
 	/*
-	 * EnterPress: No bulk option loading. Each option is fetched individually
-	 * via get_option()'s existing DB fallback path + per-request object cache.
+	 * EnterPress: No bulk DB query for autoloaded options. Instead, try to
+	 * serve from the object cache (which can be pre-warmed by the connection
+	 * proxy). If the cache is empty, return an empty array — individual
+	 * options will be fetched lazily via get_option()'s DB fallback path.
 	 *
-	 * Performance note: In production, the external object cache (Redis) is
-	 * pre-warmed by the connection proxy which learns per-URL access patterns
-	 * and pre-fetches required options in a single batch query before PHP
-	 * starts. Without an external object cache, each get_option() call that
-	 * misses the in-memory cache will issue an individual DB query — acceptable
-	 * for development, but an external object cache is strongly recommended
-	 * for production deployments.
+	 * An external object cache (Redis) is strongly recommended for
+	 * production deployments.
 	 */
-	$alloptions = array();
+	$alloptions = wp_cache_get( 'alloptions', 'options' );
+	if ( ! is_array( $alloptions ) ) {
+		$alloptions = array();
+		wp_cache_set( 'alloptions', $alloptions, 'options' );
+	}
 
 	/**
 	 * Filters all options after retrieving them.

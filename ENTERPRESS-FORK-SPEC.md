@@ -61,27 +61,30 @@ function wp_schedule_event($timestamp, $recurrence, $hook, $args = array(), $wp_
 }
 ```
 
-**Task Queue Table Schema** (created by a migration, not in this file):
-```sql
-CREATE TABLE wp_task_queue (
-    id BIGSERIAL PRIMARY KEY,
-    hook VARCHAR(255) NOT NULL,
-    args TEXT,
-    args_hash VARCHAR(32) NOT NULL DEFAULT '',  -- MD5 of serialized args for duplicate detection
-    schedule VARCHAR(255),           -- 'hourly', 'daily', etc. NULL for single events
-    interval_seconds INTEGER,        -- Recurrence interval in seconds (e.g. 3600 for hourly)
-    next_run TIMESTAMPTZ NOT NULL,
-    status VARCHAR(20) DEFAULT 'pending',  -- 'pending', 'claimed', 'completed', 'failed'
-    claimed_by VARCHAR(255),         -- Worker ID that claimed this task
-    claimed_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ,
-    attempts INTEGER DEFAULT 0,
-    max_attempts INTEGER DEFAULT 3,
-    created_at TIMESTAMPTZ DEFAULT now()
-);
+**Task Queue Table Schema** (created via `dbDelta()` during WordPress install/upgrade in `schema.php`):
 
-CREATE INDEX idx_task_queue_hook ON wp_task_queue(hook);
-CREATE INDEX idx_task_queue_next_run_status ON wp_task_queue(next_run, status);
+> **Note:** The canonical schema uses MySQL/MariaDB syntax to match WordPress conventions and `dbDelta()` requirements. For PostgreSQL deployments (e.g. via Supabase), adapt types accordingly (`BIGSERIAL`, `TIMESTAMPTZ`, partial indexes).
+
+```sql
+CREATE TABLE {prefix}task_queue (
+    id bigint(20) unsigned NOT NULL auto_increment,
+    hook varchar(255) NOT NULL,
+    args text,
+    args_hash varchar(32) NOT NULL default '',   -- MD5 of serialized args for duplicate detection
+    schedule varchar(255) default NULL,           -- 'hourly', 'daily', etc. NULL for single events
+    interval_seconds int(10) unsigned default NULL, -- Recurrence interval in seconds
+    next_run datetime NOT NULL default '0000-00-00 00:00:00',
+    status varchar(20) NOT NULL default 'pending', -- 'pending', 'claimed', 'completed', 'failed'
+    claimed_by varchar(255) default NULL,          -- Worker ID that claimed this task
+    claimed_at datetime default NULL,
+    completed_at datetime default NULL,
+    attempts int(10) unsigned NOT NULL default '0',
+    max_attempts int(10) unsigned NOT NULL default '3',
+    created_at datetime NOT NULL default CURRENT_TIMESTAMP,
+    PRIMARY KEY  (id),
+    KEY idx_task_queue_hook (hook),
+    KEY idx_task_queue_next_run_status (next_run, status)
+);
 ```
 
 **Compatibility:** Plugins that call `wp_schedule_event()` or `wp_schedule_single_event()` work unchanged — the API is preserved, only the storage backend changes. Plugins that read the `cron` option directly (rare) will see it empty.
@@ -143,26 +146,24 @@ function get_option($option, $default_value = false) {
 
 **How:**
 ```php
+// Regular transients use cache group 'transient' (singular, matching WP core conventions).
+// Site transients use cache group 'site-transient'.
+// Keys are the raw transient name (no prefix), matching WordPress's existing
+// external-object-cache code path.
 function set_transient($transient, $value, $expiration = 0) {
-    // Use wp_cache with a 'transients' group instead of wp_options
-    $expiration = ($expiration > 0) ? $expiration : 0;
-    return wp_cache_set("transient:$transient", $value, 'transients', $expiration);
+    return wp_cache_set($transient, $value, 'transient', $expiration);
 }
 
 function get_transient($transient) {
-    $value = wp_cache_get("transient:$transient", 'transients');
-    if (false === $value) {
-        return false;
-    }
-    return $value;
+    return wp_cache_get($transient, 'transient');
 }
 
 function delete_transient($transient) {
-    return wp_cache_delete("transient:$transient", 'transients');
+    return wp_cache_delete($transient, 'transient');
 }
 ```
 
-**Note:** This depends on the object cache (Redis) having a `transients` group with native TTL support. The object cache drop-in must handle expiry — WordPress's built-in transient cleanup cron becomes unnecessary.
+**Note:** This depends on the object cache (Redis) with native TTL support. The object cache drop-in must handle expiry — WordPress's built-in transient cleanup cron becomes unnecessary. All existing filter/action hooks (`pre_set_transient_{key}`, `set_transient`, `transient_{key}`, etc.) are preserved.
 
 **Test:** `set_transient('test', 'value', 300)` → `get_transient('test')` returns `'value'`. After 300s, returns `false`. Verify nothing is written to `wp_options`.
 

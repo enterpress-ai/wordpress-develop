@@ -236,13 +236,13 @@
 		 * Backward-compatible API matching wp.heartbeat.
 		 */
 		return {
-			enqueue: function( handle, data, override ) {
+			enqueue: function( handle, data, noOverwrite ) {
 				if ( handle ) {
-					if ( override ) {
-						queue[ handle ] = data;
-					} else if ( ! queue.hasOwnProperty( handle ) ) {
-						queue[ handle ] = data;
+					if ( noOverwrite && queue.hasOwnProperty( handle ) ) {
+						// Legacy Heartbeat contract: truthy third arg prevents overwrite.
+						return this;
 					}
+					queue[ handle ] = data;
 				}
 				return this;
 			},
