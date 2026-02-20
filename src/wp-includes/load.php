@@ -1311,6 +1311,26 @@ function shutdown_action_hook() {
 }
 
 /**
+ * Handles instance drain on SIGTERM during horizontal scaling.
+ *
+ * When WP_INSTANCE_DRAINING is defined as true (set by the sidecar on SIGTERM),
+ * fires the 'wp_instance_draining' action to allow graceful shutdown of
+ * long-running connections and cleanup.
+ *
+ * @since EnterPress 1.0.0
+ */
+function wp_handle_instance_drain() {
+	if ( defined( 'WP_INSTANCE_DRAINING' ) && WP_INSTANCE_DRAINING ) {
+		/**
+		 * Fires when the instance is being drained (SIGTERM received).
+		 *
+		 * @since EnterPress 1.0.0
+		 */
+		do_action( 'wp_instance_draining' );
+	}
+}
+
+/**
  * Clones an object.
  *
  * @since 2.7.0

@@ -46,6 +46,8 @@
  * @return bool|WP_Error True if event successfully scheduled. False or WP_Error on failure.
  */
 function wp_schedule_single_event( $timestamp, $hook, $args = array(), $wp_error = false ) {
+	global $wpdb;
+
 	// Make sure timestamp is a positive integer.
 	if ( ! is_numeric( $timestamp ) || $timestamp <= 0 ) {
 		if ( $wp_error ) {
@@ -65,38 +67,7 @@ function wp_schedule_single_event( $timestamp, $hook, $args = array(), $wp_error
 		'args'      => $args,
 	);
 
-	/**
-	 * Filter to override scheduling an event.
-	 *
-	 * Returning a non-null value will short-circuit adding the event to the
-	 * cron array, causing the function to return the filtered value instead.
-	 *
-	 * Both single events and recurring events are passed through this filter;
-	 * single events have `$event->schedule` as false, whereas recurring events
-	 * have this set to a recurrence from wp_get_schedules(). Recurring
-	 * events also have the integer recurrence interval set as `$event->interval`.
-	 *
-	 * For plugins replacing wp-cron, it is recommended you check for an
-	 * identical event within ten minutes and apply the {@see 'schedule_event'}
-	 * filter to check if another plugin has disallowed the event before scheduling.
-	 *
-	 * Return true if the event was scheduled, false or a WP_Error if not.
-	 *
-	 * @since 5.1.0
-	 * @since 5.7.0 The `$wp_error` parameter was added, and a WP_Error object can now be returned.
-	 *
-	 * @param null|bool|WP_Error $result   The value to return instead. Default null to continue adding the event.
-	 * @param object             $event    {
-	 *     An object containing an event's data.
-	 *
-	 *     @type string       $hook      Action hook to execute when the event is run.
-	 *     @type int          $timestamp Unix timestamp (UTC) for when to next run the event.
-	 *     @type string|false $schedule  How often the event should subsequently recur.
-	 *     @type array        $args      Array containing each separate argument to pass to the hook's callback function.
-	 *     @type int          $interval  Optional. The interval time in seconds for the schedule. Only present for recurring events.
-	 * }
-	 * @param bool               $wp_error Whether to return a WP_Error on failure.
-	 */
+	/** This filter is documented in wp-includes/cron.php */
 	$pre = apply_filters( 'pre_schedule_event', null, $event, $wp_error );
 
 	if ( null !== $pre ) {
@@ -115,22 +86,9 @@ function wp_schedule_single_event( $timestamp, $hook, $args = array(), $wp_error
 	}
 
 	/*
-	 * Check for a duplicated event.
-	 *
-	 * Don't schedule an event if there's already an identical event
-	 * within 10 minutes.
-	 *
-	 * When scheduling events within ten minutes of the current time,
-	 * all past identical events are considered duplicates.
-	 *
-	 * When scheduling an event with a past timestamp (ie, before the
-	 * current time) all events scheduled within the next ten minutes
-	 * are considered duplicates.
+	 * EnterPress: Duplicate check via task_queue table.
 	 */
-	$crons = _get_cron_array();
-
-	$key       = md5( serialize( $event->args ) );
-	$duplicate = false;
+	$args_hash = md5( serialize( $event->args ) );
 
 	if ( $event->timestamp < time() + 10 * MINUTE_IN_SECONDS ) {
 		$min_timestamp = 0;
@@ -144,20 +102,18 @@ function wp_schedule_single_event( $timestamp, $hook, $args = array(), $wp_error
 		$max_timestamp = $event->timestamp + 10 * MINUTE_IN_SECONDS;
 	}
 
-	foreach ( $crons as $event_timestamp => $cron ) {
-		if ( $event_timestamp < $min_timestamp ) {
-			continue;
-		}
-
-		if ( $event_timestamp > $max_timestamp ) {
-			break;
-		}
-
-		if ( isset( $cron[ $event->hook ][ $key ] ) ) {
-			$duplicate = true;
-			break;
-		}
-	}
+	$table     = $wpdb->prefix . 'task_queue';
+	$min_dt    = gmdate( 'Y-m-d H:i:s', $min_timestamp );
+	$max_dt    = gmdate( 'Y-m-d H:i:s', $max_timestamp );
+	$duplicate = $wpdb->get_var(
+		$wpdb->prepare(
+			"SELECT COUNT(*) FROM {$table} WHERE hook = %s AND args_hash = %s AND next_run BETWEEN %s AND %s AND status IN ('pending','claimed')",
+			$event->hook,
+			$args_hash,
+			$min_dt,
+			$max_dt
+		)
+	);
 
 	if ( $duplicate ) {
 		if ( $wp_error ) {
@@ -170,21 +126,7 @@ function wp_schedule_single_event( $timestamp, $hook, $args = array(), $wp_error
 		return false;
 	}
 
-	/**
-	 * Modify an event before it is scheduled.
-	 *
-	 * @since 3.1.0
-	 *
-	 * @param object|false $event {
-	 *     An object containing an event's data, or boolean false to prevent the event from being scheduled.
-	 *
-	 *     @type string       $hook      Action hook to execute when the event is run.
-	 *     @type int          $timestamp Unix timestamp (UTC) for when to next run the event.
-	 *     @type string|false $schedule  How often the event should subsequently recur.
-	 *     @type array        $args      Array containing each separate argument to pass to the hook's callback function.
-	 *     @type int          $interval  Optional. The interval time in seconds for the schedule. Only present for recurring events.
-	 * }
-	 */
+	/** This filter is documented in wp-includes/cron.php */
 	$event = apply_filters( 'schedule_event', $event );
 
 	// A plugin disallowed this event.
@@ -199,13 +141,32 @@ function wp_schedule_single_event( $timestamp, $hook, $args = array(), $wp_error
 		return false;
 	}
 
-	$crons[ $event->timestamp ][ $event->hook ][ $key ] = array(
-		'schedule' => $event->schedule,
-		'args'     => $event->args,
+	$result = $wpdb->insert(
+		$table,
+		array(
+			'hook'             => $event->hook,
+			'args'             => serialize( $event->args ),
+			'args_hash'        => $args_hash,
+			'schedule'         => null,
+			'interval_seconds' => null,
+			'next_run'         => gmdate( 'Y-m-d H:i:s', $event->timestamp ),
+			'status'           => 'pending',
+		),
+		array( '%s', '%s', '%s', null, null, '%s', '%s' )
 	);
-	uksort( $crons, 'strnatcasecmp' );
 
-	return _set_cron_array( $crons, $wp_error );
+	if ( false === $result ) {
+		if ( $wp_error ) {
+			return new WP_Error(
+				'could_not_set',
+				__( 'The cron event could not be saved.' )
+			);
+		}
+
+		return false;
+	}
+
+	return true;
 }
 
 /**
@@ -250,6 +211,8 @@ function wp_schedule_single_event( $timestamp, $hook, $args = array(), $wp_error
  * @return bool|WP_Error True if event successfully scheduled. False or WP_Error on failure.
  */
 function wp_schedule_event( $timestamp, $recurrence, $hook, $args = array(), $wp_error = false ) {
+	global $wpdb;
+
 	// Make sure timestamp is a positive integer.
 	if ( ! is_numeric( $timestamp ) || $timestamp <= 0 ) {
 		if ( $wp_error ) {
@@ -316,18 +279,35 @@ function wp_schedule_event( $timestamp, $recurrence, $hook, $args = array(), $wp
 		return false;
 	}
 
-	$key = md5( serialize( $event->args ) );
+	$args_hash = md5( serialize( $event->args ) );
+	$table     = $wpdb->prefix . 'task_queue';
 
-	$crons = _get_cron_array();
-
-	$crons[ $event->timestamp ][ $event->hook ][ $key ] = array(
-		'schedule' => $event->schedule,
-		'args'     => $event->args,
-		'interval' => $event->interval,
+	$result = $wpdb->insert(
+		$table,
+		array(
+			'hook'             => $event->hook,
+			'args'             => serialize( $event->args ),
+			'args_hash'        => $args_hash,
+			'schedule'         => $event->schedule,
+			'interval_seconds' => $event->interval,
+			'next_run'         => gmdate( 'Y-m-d H:i:s', $event->timestamp ),
+			'status'           => 'pending',
+		),
+		array( '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
 	);
-	uksort( $crons, 'strnatcasecmp' );
 
-	return _set_cron_array( $crons, $wp_error );
+	if ( false === $result ) {
+		if ( $wp_error ) {
+			return new WP_Error(
+				'could_not_set',
+				__( 'The cron event could not be saved.' )
+			);
+		}
+
+		return false;
+	}
+
+	return true;
 }
 
 /**
@@ -463,7 +443,47 @@ function wp_reschedule_event( $timestamp, $recurrence, $hook, $args = array(), $
 		$timestamp = $now + ( $interval - ( ( $now - $timestamp ) % $interval ) );
 	}
 
-	return wp_schedule_event( $timestamp, $recurrence, $hook, $args, $wp_error );
+	// If the schedule still exists, delegate to wp_schedule_event.
+	$schedules = wp_get_schedules();
+	if ( isset( $schedules[ $recurrence ] ) ) {
+		return wp_schedule_event( $timestamp, $recurrence, $hook, $args, $wp_error );
+	}
+
+	// EnterPress: Schedule is gone but we have a stored interval.
+	// Insert directly into the task_queue to avoid the schedule validation
+	// in wp_schedule_event(). This keeps recurring events alive even when
+	// the originating plugin / schedule is temporarily unavailable.
+	global $wpdb;
+
+	$args_hash = md5( serialize( $args ) );
+	$table     = $wpdb->prefix . 'task_queue';
+
+	$result = $wpdb->insert(
+		$table,
+		array(
+			'hook'             => $hook,
+			'args'             => serialize( $args ),
+			'args_hash'        => $args_hash,
+			'schedule'         => $recurrence,
+			'interval_seconds' => $interval,
+			'next_run'         => gmdate( 'Y-m-d H:i:s', $timestamp ),
+			'status'           => 'pending',
+		),
+		array( '%s', '%s', '%s', '%s', '%d', '%s', '%s' )
+	);
+
+	if ( false === $result ) {
+		if ( $wp_error ) {
+			return new WP_Error(
+				'could_not_set',
+				__( 'The cron event could not be saved.' )
+			);
+		}
+
+		return false;
+	}
+
+	return true;
 }
 
 /**
@@ -487,6 +507,8 @@ function wp_reschedule_event( $timestamp, $recurrence, $hook, $args = array(), $
  * @return bool|WP_Error True if event successfully unscheduled. False or WP_Error on failure.
  */
 function wp_unschedule_event( $timestamp, $hook, $args = array(), $wp_error = false ) {
+	global $wpdb;
+
 	// Make sure timestamp is a positive integer.
 	if ( ! is_numeric( $timestamp ) || $timestamp <= 0 ) {
 		if ( $wp_error ) {
@@ -499,24 +521,7 @@ function wp_unschedule_event( $timestamp, $hook, $args = array(), $wp_error = fa
 		return false;
 	}
 
-	/**
-	 * Filter to override unscheduling of events.
-	 *
-	 * Returning a non-null value will short-circuit the normal unscheduling
-	 * process, causing the function to return the filtered value instead.
-	 *
-	 * For plugins replacing wp-cron, return true if the event was successfully
-	 * unscheduled, false or a WP_Error if not.
-	 *
-	 * @since 5.1.0
-	 * @since 5.7.0 The `$wp_error` parameter was added, and a WP_Error object can now be returned.
-	 *
-	 * @param null|bool|WP_Error $pre       Value to return instead. Default null to continue unscheduling the event.
-	 * @param int                $timestamp Unix timestamp (UTC) for when to run the event.
-	 * @param string             $hook      Action hook, the execution of which will be unscheduled.
-	 * @param array              $args      Arguments to pass to the hook's callback function.
-	 * @param bool               $wp_error  Whether to return a WP_Error on failure.
-	 */
+	/** This filter is documented in wp-includes/cron.php */
 	$pre = apply_filters( 'pre_unschedule_event', null, $timestamp, $hook, $args, $wp_error );
 
 	if ( null !== $pre ) {
@@ -534,20 +539,31 @@ function wp_unschedule_event( $timestamp, $hook, $args = array(), $wp_error = fa
 		return $pre;
 	}
 
-	$crons = _get_cron_array();
-	$key   = md5( serialize( $args ) );
+	$table     = $wpdb->prefix . 'task_queue';
+	$args_hash = md5( serialize( $args ) );
+	$next_run  = gmdate( 'Y-m-d H:i:s', $timestamp );
 
-	unset( $crons[ $timestamp ][ $hook ][ $key ] );
+	$result = $wpdb->query(
+		$wpdb->prepare(
+			"DELETE FROM {$table} WHERE hook = %s AND args_hash = %s AND next_run = %s",
+			$hook,
+			$args_hash,
+			$next_run
+		)
+	);
 
-	if ( empty( $crons[ $timestamp ][ $hook ] ) ) {
-		unset( $crons[ $timestamp ][ $hook ] );
+	if ( false === $result ) {
+		if ( $wp_error ) {
+			return new WP_Error(
+				'could_not_set',
+				__( 'The cron event could not be deleted.' )
+			);
+		}
+
+		return false;
 	}
 
-	if ( empty( $crons[ $timestamp ] ) ) {
-		unset( $crons[ $timestamp ] );
-	}
-
-	return _set_cron_array( $crons, $wp_error );
+	return true;
 }
 
 /**
@@ -574,6 +590,8 @@ function wp_unschedule_event( $timestamp, $hook, $args = array(), $wp_error = fa
  *                            if unscheduling one or more events fail.
  */
 function wp_clear_scheduled_hook( $hook, $args = array(), $wp_error = false ) {
+	global $wpdb;
+
 	/*
 	 * Backward compatibility.
 	 * Previously, this function took the arguments as discrete vars rather than an array like the rest of the API.
@@ -589,24 +607,7 @@ function wp_clear_scheduled_hook( $hook, $args = array(), $wp_error = false ) {
 		$wp_error = false;
 	}
 
-	/**
-	 * Filter to override clearing a scheduled hook.
-	 *
-	 * Returning a non-null value will short-circuit the normal unscheduling
-	 * process, causing the function to return the filtered value instead.
-	 *
-	 * For plugins replacing wp-cron, return the number of events successfully
-	 * unscheduled (zero if no events were registered with the hook) or false
-	 * or a WP_Error if unscheduling one or more events fails.
-	 *
-	 * @since 5.1.0
-	 * @since 5.7.0 The `$wp_error` parameter was added, and a WP_Error object can now be returned.
-	 *
-	 * @param null|int|false|WP_Error $pre      Value to return instead. Default null to continue unscheduling the event.
-	 * @param string                  $hook     Action hook, the execution of which will be unscheduled.
-	 * @param array                   $args     Arguments to pass to the hook's callback function.
-	 * @param bool                    $wp_error Whether to return a WP_Error on failure.
-	 */
+	/** This filter is documented in wp-includes/cron.php */
 	$pre = apply_filters( 'pre_clear_scheduled_hook', null, $hook, $args, $wp_error );
 
 	if ( null !== $pre ) {
@@ -624,39 +625,29 @@ function wp_clear_scheduled_hook( $hook, $args = array(), $wp_error = false ) {
 		return $pre;
 	}
 
-	/*
-	 * This logic duplicates wp_next_scheduled().
-	 * It's required due to a scenario where wp_unschedule_event() fails due to update_option() failing,
-	 * and, wp_next_scheduled() returns the same schedule in an infinite loop.
-	 */
-	$crons = _get_cron_array();
-	if ( empty( $crons ) ) {
-		return 0;
-	}
+	$table     = $wpdb->prefix . 'task_queue';
+	$args_hash = md5( serialize( $args ) );
 
-	$results = array();
-	$key     = md5( serialize( $args ) );
+	$result = $wpdb->query(
+		$wpdb->prepare(
+			"DELETE FROM {$table} WHERE hook = %s AND args_hash = %s",
+			$hook,
+			$args_hash
+		)
+	);
 
-	foreach ( $crons as $timestamp => $cron ) {
-		if ( isset( $cron[ $hook ][ $key ] ) ) {
-			$results[] = wp_unschedule_event( $timestamp, $hook, $args, true );
-		}
-	}
-
-	$errors = array_filter( $results, 'is_wp_error' );
-	$error  = new WP_Error();
-
-	if ( $errors ) {
+	if ( false === $result ) {
 		if ( $wp_error ) {
-			array_walk( $errors, array( $error, 'merge_from' ) );
-
-			return $error;
+			return new WP_Error(
+				'could_not_set',
+				__( 'The cron events could not be deleted.' )
+			);
 		}
 
 		return false;
 	}
 
-	return count( $results );
+	return (int) $result;
 }
 
 /**
@@ -679,24 +670,9 @@ function wp_clear_scheduled_hook( $hook, $args = array(), $wp_error = false ) {
  *                            events were registered on the hook), false or WP_Error if unscheduling fails.
  */
 function wp_unschedule_hook( $hook, $wp_error = false ) {
-	/**
-	 * Filter to override clearing all events attached to the hook.
-	 *
-	 * Returning a non-null value will short-circuit the normal unscheduling
-	 * process, causing the function to return the filtered value instead.
-	 *
-	 * For plugins replacing wp-cron, return the number of events successfully
-	 * unscheduled (zero if no events were registered with the hook). If unscheduling
-	 * one or more events fails then return either a WP_Error object or false depending
-	 * on the value of the `$wp_error` parameter.
-	 *
-	 * @since 5.1.0
-	 * @since 5.7.0 The `$wp_error` parameter was added, and a WP_Error object can now be returned.
-	 *
-	 * @param null|int|false|WP_Error $pre      Value to return instead. Default null to continue unscheduling the hook.
-	 * @param string                  $hook     Action hook, the execution of which will be unscheduled.
-	 * @param bool                    $wp_error Whether to return a WP_Error on failure.
-	 */
+	global $wpdb;
+
+	/** This filter is documented in wp-includes/cron.php */
 	$pre = apply_filters( 'pre_unschedule_hook', null, $hook, $wp_error );
 
 	if ( null !== $pre ) {
@@ -714,40 +690,26 @@ function wp_unschedule_hook( $hook, $wp_error = false ) {
 		return $pre;
 	}
 
-	$crons = _get_cron_array();
-	if ( empty( $crons ) ) {
-		return 0;
-	}
+	$table  = $wpdb->prefix . 'task_queue';
+	$result = $wpdb->query(
+		$wpdb->prepare(
+			"DELETE FROM {$table} WHERE hook = %s",
+			$hook
+		)
+	);
 
-	$results = array();
-
-	foreach ( $crons as $timestamp => $args ) {
-		if ( ! empty( $crons[ $timestamp ][ $hook ] ) ) {
-			$results[] = count( $crons[ $timestamp ][ $hook ] );
+	if ( false === $result ) {
+		if ( $wp_error ) {
+			return new WP_Error(
+				'could_not_set',
+				__( 'The cron events could not be deleted.' )
+			);
 		}
 
-		unset( $crons[ $timestamp ][ $hook ] );
-
-		if ( empty( $crons[ $timestamp ] ) ) {
-			unset( $crons[ $timestamp ] );
-		}
+		return false;
 	}
 
-	/*
-	 * If the results are empty (zero events to unschedule), no attempt
-	 * to update the cron array is required.
-	 */
-	if ( empty( $results ) ) {
-		return 0;
-	}
-
-	$set = _set_cron_array( $crons, $wp_error );
-
-	if ( true === $set ) {
-		return array_sum( $results );
-	}
-
-	return $set;
+	return (int) $result;
 }
 
 /**
@@ -776,24 +738,9 @@ function wp_unschedule_hook( $hook, $wp_error = false ) {
  * }
  */
 function wp_get_scheduled_event( $hook, $args = array(), $timestamp = null ) {
-	/**
-	 * Filter to override retrieving a scheduled event.
-	 *
-	 * Returning a non-null value will short-circuit the normal process,
-	 * returning the filtered value instead.
-	 *
-	 * Return false if the event does not exist, otherwise an event object
-	 * should be returned.
-	 *
-	 * @since 5.1.0
-	 *
-	 * @param null|false|object $pre  Value to return instead. Default null to continue retrieving the event.
-	 * @param string            $hook Action hook of the event.
-	 * @param array             $args Array containing each separate argument to pass to the hook's callback function.
-	 *                                Although not passed to a callback, these arguments are used to uniquely identify
-	 *                                the event.
-	 * @param int|null  $timestamp Unix timestamp (UTC) of the event. Null to retrieve next scheduled event.
-	 */
+	global $wpdb;
+
+	/** This filter is documented in wp-includes/cron.php */
 	$pre = apply_filters( 'pre_get_scheduled_event', null, $hook, $args, $timestamp );
 
 	if ( null !== $pre ) {
@@ -804,41 +751,42 @@ function wp_get_scheduled_event( $hook, $args = array(), $timestamp = null ) {
 		return false;
 	}
 
-	$crons = _get_cron_array();
-	if ( empty( $crons ) ) {
-		return false;
+	$table     = $wpdb->prefix . 'task_queue';
+	$args_hash = md5( serialize( $args ) );
+
+	if ( null !== $timestamp ) {
+		$next_run = gmdate( 'Y-m-d H:i:s', $timestamp );
+		$row      = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT * FROM {$table} WHERE hook = %s AND args_hash = %s AND next_run = %s AND status IN ('pending','claimed') LIMIT 1",
+				$hook,
+				$args_hash,
+				$next_run
+			)
+		);
+	} else {
+		$row = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT * FROM {$table} WHERE hook = %s AND args_hash = %s AND status IN ('pending','claimed') ORDER BY next_run ASC LIMIT 1",
+				$hook,
+				$args_hash
+			)
+		);
 	}
 
-	$key = md5( serialize( $args ) );
-
-	if ( ! $timestamp ) {
-		// Get next event.
-		$next = false;
-		foreach ( $crons as $timestamp => $cron ) {
-			if ( isset( $cron[ $hook ][ $key ] ) ) {
-				$next = $timestamp;
-				break;
-			}
-		}
-
-		if ( ! $next ) {
-			return false;
-		}
-
-		$timestamp = $next;
-	} elseif ( ! isset( $crons[ $timestamp ][ $hook ][ $key ] ) ) {
+	if ( ! $row ) {
 		return false;
 	}
 
 	$event = (object) array(
-		'hook'      => $hook,
-		'timestamp' => $timestamp,
-		'schedule'  => $crons[ $timestamp ][ $hook ][ $key ]['schedule'],
+		'hook'      => $row->hook,
+		'timestamp' => strtotime( $row->next_run ),
+		'schedule'  => $row->schedule ? $row->schedule : false,
 		'args'      => $args,
 	);
 
-	if ( isset( $crons[ $timestamp ][ $hook ][ $key ]['interval'] ) ) {
-		$event->interval = $crons[ $timestamp ][ $hook ][ $key ]['interval'];
+	if ( $row->interval_seconds ) {
+		$event->interval = (int) $row->interval_seconds;
 	}
 
 	return $event;
@@ -897,106 +845,8 @@ function wp_next_scheduled( $hook, $args = array() ) {
  * @return bool True if spawned, false if no events spawned.
  */
 function spawn_cron( $gmt_time = 0 ) {
-	if ( ! $gmt_time ) {
-		$gmt_time = microtime( true );
-	}
-
-	if ( defined( 'DOING_CRON' ) || isset( $_GET['doing_wp_cron'] ) ) {
-		return false;
-	}
-
-	/*
-	 * Get the cron lock, which is a Unix timestamp of when the last cron was spawned
-	 * and has not finished running.
-	 *
-	 * Multiple processes on multiple web servers can run this code concurrently,
-	 * this lock attempts to make spawning as atomic as possible.
-	 */
-	$lock = (float) get_transient( 'doing_cron' );
-
-	if ( $lock > $gmt_time + 10 * MINUTE_IN_SECONDS ) {
-		$lock = 0;
-	}
-
-	// Don't run if another process is currently running it or more than once every 60 sec.
-	if ( $lock + WP_CRON_LOCK_TIMEOUT > $gmt_time ) {
-		return false;
-	}
-
-	// Confidence check.
-	$crons = wp_get_ready_cron_jobs();
-	if ( empty( $crons ) ) {
-		return false;
-	}
-
-	$keys = array_keys( $crons );
-	if ( isset( $keys[0] ) && $keys[0] > $gmt_time ) {
-		return false;
-	}
-
-	if ( defined( 'ALTERNATE_WP_CRON' ) && ALTERNATE_WP_CRON ) {
-		if ( 'GET' !== $_SERVER['REQUEST_METHOD'] || defined( 'DOING_AJAX' ) || defined( 'XMLRPC_REQUEST' ) ) {
-			return false;
-		}
-
-		$doing_wp_cron = sprintf( '%.22F', $gmt_time );
-		set_transient( 'doing_cron', $doing_wp_cron );
-
-		ob_start();
-		wp_redirect( add_query_arg( 'doing_wp_cron', $doing_wp_cron, wp_unslash( $_SERVER['REQUEST_URI'] ) ) );
-		echo ' ';
-
-		// Flush any buffers and send the headers.
-		wp_ob_end_flush_all();
-		flush();
-
-		require_once ABSPATH . 'wp-cron.php';
-		return true;
-	}
-
-	// Set the cron lock with the current unix timestamp, when the cron is being spawned.
-	$doing_wp_cron = sprintf( '%.22F', $gmt_time );
-	set_transient( 'doing_cron', $doing_wp_cron );
-
-	/**
-	 * Filters the cron request arguments.
-	 *
-	 * @since 3.5.0
-	 * @since 4.5.0 The `$doing_wp_cron` parameter was added.
-	 *
-	 * @param array $cron_request_array {
-	 *     An array of cron request URL arguments.
-	 *
-	 *     @type string $url  The cron request URL.
-	 *     @type string $key  The Unix timestamp (UTC) of the cron lock with microseconds.
-	 *     @type array  $args {
-	 *         An array of cron request arguments.
-	 *
-	 *         @type int  $timeout   The request timeout in seconds. Default .01 seconds.
-	 *         @type bool $blocking  Whether to set blocking for the request. Default false.
-	 *         @type bool $sslverify Whether SSL should be verified for the request. Default false.
-	 *     }
-	 * }
-	 * @param string $doing_wp_cron The Unix timestamp (UTC) of the cron lock with microseconds.
-	 */
-	$cron_request = apply_filters(
-		'cron_request',
-		array(
-			'url'  => add_query_arg( 'doing_wp_cron', $doing_wp_cron, site_url( 'wp-cron.php' ) ),
-			'key'  => $doing_wp_cron,
-			'args' => array(
-				'timeout'   => 0.01,
-				'blocking'  => false,
-				/** This filter is documented in wp-includes/class-wp-http-streams.php */
-				'sslverify' => apply_filters( 'https_local_ssl_verify', false ),
-			),
-		),
-		$doing_wp_cron
-	);
-
-	$result = wp_remote_post( $cron_request['url'], $cron_request['args'] );
-
-	return ! is_wp_error( $result );
+	// EnterPress: Inline cron removed. Use external cron runner (sidecar).
+	return false;
 }
 
 /**
@@ -1016,17 +866,8 @@ function spawn_cron( $gmt_time = 0 ) {
  *              unless `ALTERNATE_WP_CRON` is enabled; the function now always returns void.
  */
 function wp_cron(): void {
-	if ( defined( 'ALTERNATE_WP_CRON' ) && ALTERNATE_WP_CRON ) {
-		if ( did_action( 'wp_loaded' ) ) {
-			_wp_cron();
-		} else {
-			add_action( 'wp_loaded', '_wp_cron', 20 );
-		}
-	} elseif ( doing_action( 'shutdown' ) ) {
-		_wp_cron();
-	} else {
-		add_action( 'shutdown', '_wp_cron' );
-	}
+	// EnterPress: Inline cron removed. Use external cron runner (sidecar).
+	return;
 }
 
 /**
@@ -1044,49 +885,8 @@ function wp_cron(): void {
  *                   events needed to be spawned), false if spawning fails for one or more events.
  */
 function _wp_cron() {
-	// Prevent infinite loops caused by lack of wp-cron.php.
-	if ( str_contains( $_SERVER['REQUEST_URI'], '/wp-cron.php' )
-		|| ( defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON )
-	) {
-		return 0;
-	}
-
-	$crons = wp_get_ready_cron_jobs();
-	if ( empty( $crons ) ) {
-		return 0;
-	}
-
-	$gmt_time = microtime( true );
-	$keys     = array_keys( $crons );
-	if ( isset( $keys[0] ) && $keys[0] > $gmt_time ) {
-		return 0;
-	}
-
-	$schedules = wp_get_schedules();
-	$results   = array();
-
-	foreach ( $crons as $timestamp => $cronhooks ) {
-		if ( $timestamp > $gmt_time ) {
-			break;
-		}
-
-		foreach ( (array) $cronhooks as $hook => $args ) {
-			if ( isset( $schedules[ $hook ]['callback'] )
-				&& ! call_user_func( $schedules[ $hook ]['callback'] )
-			) {
-				continue;
-			}
-
-			$results[] = spawn_cron( $gmt_time );
-			break 2;
-		}
-	}
-
-	if ( in_array( false, $results, true ) ) {
-		return false;
-	}
-
-	return count( $results );
+	// EnterPress: Inline cron removed. Use external cron runner (sidecar).
+	return 0;
 }
 
 /**
@@ -1211,33 +1011,39 @@ function wp_get_schedule( $hook, $args = array() ) {
  * @return array[] Array of cron job arrays ready to be run.
  */
 function wp_get_ready_cron_jobs() {
-	/**
-	 * Filter to override retrieving ready cron jobs.
-	 *
-	 * Returning an array will short-circuit the normal retrieval of ready
-	 * cron jobs, causing the function to return the filtered value instead.
-	 *
-	 * @since 5.1.0
-	 *
-	 * @param null|array[] $pre Array of ready cron tasks to return instead. Default null
-	 *                          to continue using results from _get_cron_array().
-	 */
+	global $wpdb;
+
+	/** This filter is documented in wp-includes/cron.php */
 	$pre = apply_filters( 'pre_get_ready_cron_jobs', null );
 
 	if ( null !== $pre ) {
 		return $pre;
 	}
 
-	$crons    = _get_cron_array();
-	$gmt_time = microtime( true );
-	$results  = array();
+	$table   = $wpdb->prefix . 'task_queue';
+	$now     = gmdate( 'Y-m-d H:i:s' );
+	$rows    = $wpdb->get_results(
+		$wpdb->prepare(
+			"SELECT * FROM {$table} WHERE next_run <= %s AND status = 'pending' ORDER BY next_run ASC",
+			$now
+		)
+	);
+	$results = array();
 
-	foreach ( $crons as $timestamp => $cronhooks ) {
-		if ( $timestamp > $gmt_time ) {
-			break;
+	if ( $rows ) {
+		foreach ( $rows as $row ) {
+			$timestamp = strtotime( $row->next_run );
+			$args      = maybe_unserialize( $row->args );
+			$args_hash = $row->args_hash;
+			$entry     = array(
+				'schedule' => $row->schedule ? $row->schedule : false,
+				'args'     => $args,
+			);
+			if ( $row->interval_seconds ) {
+				$entry['interval'] = (int) $row->interval_seconds;
+			}
+			$results[ $timestamp ][ $row->hook ][ $args_hash ] = $entry;
 		}
-
-		$results[ $timestamp ] = $cronhooks;
 	}
 
 	return $results;
@@ -1257,18 +1063,8 @@ function wp_get_ready_cron_jobs() {
  * @return array[] Array of cron events.
  */
 function _get_cron_array() {
-	$cron = get_option( 'cron' );
-	if ( ! is_array( $cron ) ) {
-		return array();
-	}
-
-	if ( ! isset( $cron['version'] ) ) {
-		$cron = _upgrade_cron_array( $cron );
-	}
-
-	unset( $cron['version'] );
-
-	return $cron;
+	// EnterPress: Cron data now stored in task_queue table.
+	return array();
 }
 
 /**
@@ -1285,22 +1081,8 @@ function _get_cron_array() {
  * @return bool|WP_Error True if cron array updated. False or WP_Error on failure.
  */
 function _set_cron_array( $cron, $wp_error = false ) {
-	if ( ! is_array( $cron ) ) {
-		$cron = array();
-	}
-
-	$cron['version'] = 2;
-
-	$result = update_option( 'cron', $cron, true );
-
-	if ( $wp_error && ! $result ) {
-		return new WP_Error(
-			'could_not_set',
-			__( 'The cron event list could not be saved.' )
-		);
-	}
-
-	return $result;
+	// EnterPress: Cron data now stored in task_queue table.
+	return true;
 }
 
 /**
@@ -1315,23 +1097,6 @@ function _set_cron_array( $cron, $wp_error = false ) {
  * @return array An upgraded cron info array.
  */
 function _upgrade_cron_array( $cron ) {
-	if ( isset( $cron['version'] ) && 2 === $cron['version'] ) {
-		return $cron;
-	}
-
-	$new_cron = array();
-
-	foreach ( (array) $cron as $timestamp => $hooks ) {
-		foreach ( (array) $hooks as $hook => $args ) {
-			$key = md5( serialize( $args['args'] ) );
-
-			$new_cron[ $timestamp ][ $hook ][ $key ] = $args;
-		}
-	}
-
-	$new_cron['version'] = 2;
-
-	update_option( 'cron', $new_cron, true );
-
-	return $new_cron;
+	// EnterPress: Cron data now stored in task_queue table.
+	return array();
 }

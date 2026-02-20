@@ -164,6 +164,7 @@ if ( is_multisite() ) {
 }
 
 register_shutdown_function( 'shutdown_action_hook' );
+register_shutdown_function( 'wp_handle_instance_drain' );
 
 // Stop most of WordPress from being loaded if SHORTINIT is enabled.
 if ( SHORTINIT ) {

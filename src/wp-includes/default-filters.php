@@ -404,9 +404,10 @@ add_action( 'rss2_head', 'rss2_site_icon' );
 
 
 // WP Cron.
-if ( ! defined( 'DOING_CRON' ) ) {
-	add_action( 'init', 'wp_cron' );
-}
+// EnterPress: Inline cron trigger removed. Use external cron runner (sidecar).
+// if ( ! defined( 'DOING_CRON' ) ) {
+// 	add_action( 'init', 'wp_cron' );
+// }
 
 // HTTPS migration.
 add_action( 'update_option_home', 'wp_update_https_migration_required', 10, 2 );
