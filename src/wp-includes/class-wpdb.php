@@ -299,6 +299,7 @@ class wpdb {
 		'term_relationships',
 		'termmeta',
 		'commentmeta',
+		'task_queue',
 	);
 
 	/**
@@ -403,6 +404,15 @@ class wpdb {
 	 * @var string
 	 */
 	public $posts;
+
+	/**
+	 * EnterPress Task Queue table.
+	 *
+	 * @since EnterPress 1.0.0
+	 *
+	 * @var string
+	 */
+	public $task_queue;
 
 	/**
 	 * WordPress Terms table.

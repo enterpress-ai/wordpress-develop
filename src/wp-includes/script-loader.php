@@ -858,7 +858,23 @@ function wp_default_scripts( $scripts ) {
 
 	$scripts->add( 'autosave', "/wp-includes/js/autosave$suffix.js", array( 'heartbeat' ), false, 1 );
 
-	$scripts->add( 'heartbeat', "/wp-includes/js/heartbeat$suffix.js", array( 'jquery', 'wp-hooks' ), false, 1 );
+	// EnterPress: Supabase Realtime client (CDN).
+	$scripts->add( 'supabase-realtime', 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.97.0/dist/umd/supabase.min.js', array(), '2.97.0', 1 );
+
+	// EnterPress: Replace heartbeat polling with WebSocket-based realtime.
+	$scripts->add( 'heartbeat', "/wp-includes/js/realtime$suffix.js", array( 'jquery', 'wp-hooks', 'supabase-realtime' ), false, 1 );
+	did_action( 'init' ) && $scripts->localize(
+		'heartbeat',
+		'wpRealtimeSettings',
+		array(
+			'supabaseUrl'      => defined( 'SUPABASE_URL' ) ? SUPABASE_URL : '',
+			'supabaseAnonKey'  => defined( 'SUPABASE_ANON_KEY' ) ? SUPABASE_ANON_KEY : '',
+			'tablePrefix'      => $GLOBALS['wpdb']->prefix,
+			'ajaxUrl'          => admin_url( 'admin-ajax.php' ),
+			'nonce'            => wp_installing() ? '' : wp_create_nonce( 'heartbeat-nonce' ),
+			'eventsPerSecond'  => defined( 'ENTERPRESS_REALTIME_EVENTS_PER_SEC' ) ? (int) ENTERPRESS_REALTIME_EVENTS_PER_SEC : 2,
+		)
+	);
 	did_action( 'init' ) && $scripts->localize(
 		'heartbeat',
 		'heartbeatSettings',
